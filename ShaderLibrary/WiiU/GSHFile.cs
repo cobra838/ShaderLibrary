@@ -38,6 +38,12 @@ namespace ShaderLibrary.WiiU
         public List<GX2Block> Blocks = new List<GX2Block>();
         public List<GX2Shader> Shaders = new List<GX2Shader>();
 
+        // GFD archives may store all vertex programs followed by all pixel programs.
+        // Stage indices follow file order; a Shaders entry is not a declared VS/PS binding.
+        public IEnumerable<GX2Shader> VertexShaders => Shaders.Where(x => x.VertexHeader != null);
+        public IEnumerable<GX2Shader> PixelShaders => Shaders.Where(x => x.PixelHeader != null);
+        public IEnumerable<GX2Shader> GeometryShaders => Shaders.Where(x => x.GeometryHeader != null);
+
         public GSHFile(string path) {
             Read(new BinaryDataReader(File.OpenRead(path), true));
         }
@@ -57,7 +63,7 @@ namespace ShaderLibrary.WiiU
             if (header.GpuVersion != 2)
                 throw new Exception($"Unsupported GPU version {header.GpuVersion}");
 
-            GX2Shader currentShader = new GX2Shader();
+            GX2Shader? currentShader = null;
 
             reader.SeekBegin(header.HeaderSize);
             while (reader.Position < reader.BaseStream.Length)
@@ -69,24 +75,43 @@ namespace ShaderLibrary.WiiU
                 reader.SeekBegin(start + block.HeaderSize);
                 var data = reader.ReadBytes((int)block.DataSize);
 
-                if (block.BlockType == BlockType.VertexShaderHeader)
+                bool isVertexHeader = block.BlockType == BlockType.VertexShaderHeader;
+                bool isPixelHeader = block.BlockType == BlockType.PixelShaderHeader;
+                bool isGeometryHeader = block.BlockType == BlockType.GeometryShaderHeader;
+                if ((isVertexHeader || isPixelHeader || isGeometryHeader) &&
+                    (currentShader == null || isVertexHeader ||
+                     (isPixelHeader && currentShader.PixelHeader != null) ||
+                     (isGeometryHeader && currentShader.GeometryHeader != null)))
                 {
-                    currentShader = new GX2Shader(); //make new shader as vertex header is always first
+                    // Keep ordinary VS/PS/GS groups compatible, but never overwrite a stage.
+                    currentShader = new GX2Shader();
                     Shaders.Add(currentShader);
-
-                    currentShader.VertexHeader = new GX2VertexHeader(new MemoryStream(data));
                 }
-                if (block.BlockType == BlockType.PixelShaderHeader)
+                if (isVertexHeader)
+                    currentShader.VertexHeader = new GX2VertexHeader(new MemoryStream(data));
+                if (isPixelHeader)
                     currentShader.PixelHeader = new GX2PixelHeader(new MemoryStream(data));
-                if (block.BlockType == BlockType.GeometryShaderHeader)
+                if (isGeometryHeader)
                     currentShader.GeometryHeader = new GX2GeometryShaderHeader(new MemoryStream(data));
 
                 if (block.BlockType == BlockType.VertexShaderProgram)
+                {
+                    if (currentShader?.VertexHeader == null || currentShader.VertexData != null)
+                        throw new InvalidDataException("Vertex program without an unused vertex header.");
                     currentShader.VertexData = data;
+                }
                 if (block.BlockType == BlockType.PixelShaderProgram)
+                {
+                    if (currentShader?.PixelHeader == null || currentShader.PixelData != null)
+                        throw new InvalidDataException("Pixel program without an unused pixel header.");
                     currentShader.PixelData = data;
+                }
                 if (block.BlockType == BlockType.GeometryShaderProgram)
+                {
+                    if (currentShader?.GeometryHeader == null || currentShader.GeometryData != null)
+                        throw new InvalidDataException("Geometry program without an unused geometry header.");
                     currentShader.GeometryData = data;
+                }
 
                 Blocks.Add(new GX2Block()
                 {
@@ -132,7 +157,7 @@ namespace ShaderLibrary.WiiU
                 using (var writer = new BinaryDataWriter(mem))
                 {
                     PixelHeader.align = true;
-                    PixelHeader.DataSize = (uint)VertexData.Length;
+                    PixelHeader.DataSize = (uint)PixelData.Length;
                     PixelHeader.Write(writer);
                     writer.Write(PixelData);
                 }
@@ -144,7 +169,7 @@ namespace ShaderLibrary.WiiU
                 using (var writer = new BinaryDataWriter(mem))
                 {
                     GeometryHeader.align = true;
-                    GeometryHeader.DataSize = (uint)VertexData.Length;
+                    GeometryHeader.DataSize = (uint)GeometryData.Length;
                     GeometryHeader.Write(writer);
                     writer.Write(GeometryData);
                 }
@@ -419,7 +444,8 @@ namespace ShaderLibrary.WiiU
 
             public void Write(BinaryDataWriter writer)
             {
-                writer.WriteStruct(ShaderRegsHeader);
+                writer.IsWiiU = true;
+                writer.Write(ShaderRegsHeader);
                 writer.Write(DataSize);
                 var dataOffs = writer.SaveOffset();
                 writer.Write(0);

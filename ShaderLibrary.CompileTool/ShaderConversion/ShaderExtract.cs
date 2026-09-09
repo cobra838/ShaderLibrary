@@ -3,6 +3,7 @@ using System.Linq;
 using System.Text;
 using ShaderLibrary;
 using ShaderLibrary.CompileTool;
+using ControlShader = ShaderLibrary.ControlShader;
 
 namespace EffectLibraryTest
 {
@@ -213,8 +214,6 @@ namespace EffectLibraryTest
 
         static string ApplyConstants(string code, float[] constants)
         {
-            string blockName = "vp_c1_1._m0";
-
             Dictionary<string, float> constant_lookup = new Dictionary<string, float>();
 
             int index = 0;
@@ -230,9 +229,10 @@ namespace EffectLibraryTest
 
                     float value = constants[i];
 
-                    //Expected variable name stored in the block
-                    string variable_name = $"{blockName}[{index}].{swizzle}";
-                    constant_lookup.Add(variable_name, value);
+                    // Support both older and current Ryujinx constant-buffer names.
+                    constant_lookup.Add($"vp_c1_1._m0[{index}].{swizzle}", value);
+                    constant_lookup.Add($"vp_c1.data[{index}].{swizzle}", value);
+                    constant_lookup.Add($"fp_c1.data[{index}].{swizzle}", value);
 
                     swizzle = SwizzleShift(swizzle);
 
@@ -255,13 +255,14 @@ namespace EffectLibraryTest
                     if (line != null)
                     {
                         //swap variable with raw constant value
-                        if (line.Contains("vp_c1_1._m0"))
+                        if (line.Contains("vp_c1_1._m0") || line.Contains("vp_c1.data[") ||
+                            line.Contains("fp_c1.data["))
                         {
                             //find variable and replace it
                             foreach (var var in constant_lookup)
                             {
                                 if (line.Contains(var.Key))
-                                    line = line.Replace(var.Key, var.Value.ToString());
+                                    line = line.Replace(var.Key, var.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));
                             }
                         }
 

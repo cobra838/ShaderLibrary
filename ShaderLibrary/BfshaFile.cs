@@ -300,6 +300,39 @@ namespace ShaderLibrary
             return this.KeyTable.Skip(idx).Take(num_keys_per_program).ToArray();
         }
 
+        /// <summary>Change one option in a program's lookup key, preserving all other bits.</summary>
+        public void SetOptionKey(ShaderOption option, string choice, int programIndex)
+        {
+            if (programIndex < 0 || programIndex >= Programs.Count)
+                throw new ArgumentOutOfRangeException(nameof(programIndex));
+
+            int word;
+            if (StaticOptions.Values.Contains(option))
+            {
+                word = option.Bit32Index;
+                if (word >= StaticKeyLength)
+                    throw new InvalidDataException("Static option key index is out of bounds.");
+            }
+            else if (DynamicOptions.Values.Contains(option))
+            {
+                int dynamicWord = option.Bit32Index - option.KeyOffset;
+                if (dynamicWord < 0 || dynamicWord >= DynamicKeyLength)
+                    throw new InvalidDataException("Dynamic option key index is out of bounds.");
+                word = StaticKeyLength + dynamicWord;
+            }
+            else
+                throw new ArgumentException("Option does not belong to this shader model.", nameof(option));
+
+            int choiceIndex = option.Choices.GetIndex(choice);
+            if (choiceIndex < 0)
+                throw new ArgumentException($"Invalid choice '{choice}' for option '{option.Name}'.", nameof(choice));
+
+            int index = checked(programIndex * (StaticKeyLength + DynamicKeyLength) + word);
+            if (KeyTable == null || index >= KeyTable.Length)
+                throw new InvalidDataException("Program key table is truncated.");
+            option.SetKey(ref KeyTable[index], choiceIndex);
+        }
+
         public List<int> GetProgramIndexList(Dictionary<string, string> options)
         {
             List<int> indices = new List<int>();
