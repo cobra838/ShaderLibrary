@@ -43,6 +43,7 @@ namespace ShaderLibrary
 
         public byte FragmentUnk;
         public byte PerSamplerInvocation;
+        public byte[] ComputePadding = new byte[6];
 
         private uint[] Unknowns = new uint[50];
 
@@ -130,6 +131,7 @@ namespace ShaderLibrary
 
             FragmentUnk = reader.ReadByte();
             PerSamplerInvocation = reader.ReadByte();
+            ComputePadding = reader.ReadBytes(6);
 
             ShaderComp = new Comp()
             {
@@ -205,6 +207,7 @@ namespace ShaderLibrary
             writer.Write(Padding4);
             writer.Write(FragmentUnk);
             writer.Write(PerSamplerInvocation);
+            writer.Write(ComputePadding);
             writer.Write(ShaderComp.BlockDims[0]);
             writer.Write(ShaderComp.BlockDims[1]);
             writer.Write(ShaderComp.BlockDims[2]);

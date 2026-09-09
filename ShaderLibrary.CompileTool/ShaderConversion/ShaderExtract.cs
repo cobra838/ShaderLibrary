@@ -57,7 +57,7 @@ namespace EffectLibraryTest
         {
             var control_code = new ControlShader(shaderCode.ControlCode);
 
-            string code = TegraShaderTranslator.Decompile(shaderCode.ByteCode);
+            string code = TegraShaderTranslator.Decompile(shaderCode.ByteCode, control_code);
             float[] constants = control_code.GetConstantsAsFloats(shaderCode.ByteCode);
 
             //Apply the code to be usable with the UAM compiler
@@ -110,6 +110,10 @@ namespace EffectLibraryTest
 
             foreach (var name in reflect.Outputs.Keys)
             {
+                // Reflection can describe a built-in array element (gl_FragData[0]),
+                // which cannot be used as the name of a GLSL variable declaration.
+                if (name.StartsWith("gl_"))
+                    continue;
                 int location = reflect.GetOutputLocation(name);
                 if (location == -1)
                     continue;

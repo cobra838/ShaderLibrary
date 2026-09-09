@@ -16,6 +16,15 @@ namespace EffectLibraryTest
             return TranslateShader(bytecode.Slice(48, bytecode.Length - 48).ToArray());
         }
 
+        public static string Decompile(byte[] bytecode, ShaderLibrary.ControlShader control)
+        {
+            bool compute = control.ShaderStage == ShaderLibrary.ControlShader.NVNshaderStage.NVN_SHADER_STAGE_COMPUTE;
+            var flags = compute ? TranslationFlags.Compute : TranslationFlags.None;
+            var options = new TranslationOptions(TargetLanguage.Glsl, TargetApi.OpenGL, flags);
+            var accessor = new GpuAccessor(bytecode.AsSpan(checked((int)control.ProgramOffset)).ToArray(), control);
+            return Translator.CreateContext(0, accessor, options).Translate().Code;
+        }
+
         static string TranslateShader(byte[] data)
         {
             TranslationFlags flags = TranslationFlags.None;
@@ -28,11 +37,19 @@ namespace EffectLibraryTest
         private class GpuAccessor : IGpuAccessor
         {
             private readonly byte[] _data;
+            private readonly ShaderLibrary.ControlShader? _control;
 
-            public GpuAccessor(byte[] data)
+            public GpuAccessor(byte[] data, ShaderLibrary.ControlShader? control = null)
             {
                 _data = data;
+                _control = control;
             }
+
+            public int QueryComputeLocalSizeX() => checked((int)(_control?.ShaderComp.BlockDims[0] ?? 1));
+            public int QueryComputeLocalSizeY() => checked((int)(_control?.ShaderComp.BlockDims[1] ?? 1));
+            public int QueryComputeLocalSizeZ() => checked((int)(_control?.ShaderComp.BlockDims[2] ?? 1));
+            public int QueryComputeSharedMemorySize() => checked((int)(_control?.ShaderComp.SharedMemSz ?? 0));
+            public int QueryComputeLocalMemorySize() => checked((int)(_control?.ShaderComp.LocalPosMemSz ?? 0));
 
             public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize)
             {
