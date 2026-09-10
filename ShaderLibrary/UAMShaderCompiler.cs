@@ -36,17 +36,19 @@ namespace ShaderBuilderTool
         /// <param name="text"></param>
         /// <param name="kind"></param>
         /// <returns></returns>
-        public static ShaderOutput CompileByText(string text, Kind kind, string? compilerPath = null)
+        public static ShaderOutput CompileByText(string text, Kind kind, string? compilerPath = null, int? driverUniformBinding = null)
         {
             if (!Enum.IsDefined(typeof(Kind), kind))
                 throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown shader stage.");
+            if (driverUniformBinding.HasValue && (kind != Kind.comp || driverUniformBinding < 0 || driverUniformBinding > 15))
+                throw new ArgumentOutOfRangeException(nameof(driverUniformBinding), "Driver UBO requires compute and a binding from 0 to 15.");
             string executable = Path.GetFullPath(compilerPath ?? Path.Combine(_folder, "uam.exe"));
             string workDirectory = Path.Combine(Path.GetTempPath(), "ShaderLibrary-uam-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(workDirectory);
             try
             {
                 File.WriteAllText(Path.Combine(workDirectory, "input.glsl"), text);
-                return Compile(executable, workDirectory, kind);
+                return Compile(executable, workDirectory, kind, driverUniformBinding);
             }
             finally
             {
@@ -59,9 +61,9 @@ namespace ShaderBuilderTool
             return CompileByText(GlslUtility.ApplyMacros(macros, text), kind, compilerPath);
         }
 
-        static ShaderOutput Compile(string executable, string workDirectory, Kind kind)
+        static ShaderOutput Compile(string executable, string workDirectory, Kind kind, int? driverUniformBinding)
         {
-            ExecuteCommand(executable, workDirectory, kind);
+            ExecuteCommand(executable, workDirectory, kind, driverUniformBinding);
             string programPath = Path.Combine(workDirectory, "program.bin");
             string controlPath = Path.Combine(workDirectory, "control.bin");
             if (!File.Exists(programPath) || !File.Exists(controlPath))
@@ -98,7 +100,7 @@ namespace ShaderBuilderTool
             };
         }
 
-        static void ExecuteCommand(string exePath, string workDirectory, Kind kind)
+        static void ExecuteCommand(string exePath, string workDirectory, Kind kind, int? driverUniformBinding)
         {
             var info = new ProcessStartInfo
             {
@@ -125,6 +127,8 @@ namespace ShaderBuilderTool
             foreach (string argument in new[] {
                 "--glslcbinds", "--nvnctrl=control.bin", "--nvngpu=program.bin", "-s", stageArgument, "input.glsl" })
                 info.ArgumentList.Add(argument);
+            if (driverUniformBinding.HasValue)
+                info.ArgumentList.Add($"--driver-ubo={driverUniformBinding.Value}");
 
             using var cmd = Process.Start(info) ?? throw new InvalidOperationException("Could not start UAM.");
             var stdout = cmd.StandardOutput.ReadToEndAsync();

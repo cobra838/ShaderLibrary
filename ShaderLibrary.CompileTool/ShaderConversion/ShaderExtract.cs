@@ -56,6 +56,10 @@ namespace EffectLibraryTest
         public static string GetCode(BnshFile.ShaderCode shaderCode, BnshFile.ShaderReflectionData reflect = null)
         {
             var control_code = new ControlShader(shaderCode.ControlCode);
+            // Compute preparation also returns a driver binding for UAM. Use
+            // ComputeShaderConversion.Prepare/Compile when recompiling this source.
+            if (control_code.ShaderStage == ControlShader.NVNshaderStage.NVN_SHADER_STAGE_COMPUTE)
+                return ComputeShaderConversion.Prepare(shaderCode).Code;
 
             string code = TegraShaderTranslator.Decompile(shaderCode.ByteCode, control_code);
             float[] constants = control_code.GetConstantsAsFloats(shaderCode.ByteCode);

@@ -6,13 +6,13 @@ namespace ShaderLibrary.CompileTool
     public class UAMShaderCompiler
     {
         // Compile source without requiring an existing target-platform binary.
-        public static ShaderOutput CompileByText(string text, string kind, string? compilerPath = null)
+        public static ShaderOutput CompileByText(string text, string kind, string? compilerPath = null, int? driverUniformBinding = null)
         {
             if (!Enum.TryParse<Compiler.Kind>(kind, out var stage) || !Enum.IsDefined(stage))
                 throw new ArgumentException($"Unknown shader stage: {kind}", nameof(kind));
 
             var result = Compiler.CompileByText(text, stage,
-                compilerPath ?? Path.Combine(Path.GetDirectoryName(typeof(UAMShaderCompiler).Assembly.Location)!, "uam.exe"));
+                compilerPath ?? Path.Combine(Path.GetDirectoryName(typeof(UAMShaderCompiler).Assembly.Location)!, "uam.exe"), driverUniformBinding);
             return new ShaderOutput { ShaderCode = result.ShaderCode, Control = result.Control };
         }
 
