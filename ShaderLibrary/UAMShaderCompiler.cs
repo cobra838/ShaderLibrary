@@ -20,7 +20,7 @@ namespace ShaderBuilderTool
         static string _exeFolder => AppContext.BaseDirectory;
         static string _folder => Path.Combine(_exeFolder, "tools");
 
-        public enum Kind // Type names based on extension and argument for uam tool.
+        public enum Kind // Type names based on shader file extensions.
         {
             vert, // Vertex
             frag, // Fragment
@@ -36,54 +36,52 @@ namespace ShaderBuilderTool
         /// <param name="text"></param>
         /// <param name="kind"></param>
         /// <returns></returns>
-        public static ShaderOutput CompileByText(string text, Kind kind)
+        public static ShaderOutput CompileByText(string text, Kind kind, string? compilerPath = null)
         {
-            string inputFile = Path.Combine(_folder, "input.glsl");
-            File.WriteAllText(inputFile, text);
-            return Compile("input.glsl", kind);
-        }
-
-        public static ShaderOutput CompileByText(string text, Kind kind, Dictionary<string, string> macros)
-        {
-            string inputFile = Path.Combine(_folder, "input.glsl");
-            File.WriteAllText(inputFile,  GlslUtility.ApplyMacros(macros, text));
-            var compiled = Compile("input.glsl", kind);
+            if (!Enum.IsDefined(typeof(Kind), kind))
+                throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown shader stage.");
+            string executable = Path.GetFullPath(compilerPath ?? Path.Combine(_folder, "uam.exe"));
+            string workDirectory = Path.Combine(Path.GetTempPath(), "ShaderLibrary-uam-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(workDirectory);
             try
             {
-                File.Copy(inputFile, "test.glsl", true);
+                File.WriteAllText(Path.Combine(workDirectory, "input.glsl"), text);
+                return Compile(executable, workDirectory, kind);
             }
-            catch { }
-
-            File.Delete(inputFile);
-            return compiled;
+            finally
+            {
+                Directory.Delete(workDirectory, true);
+            }
         }
 
-        static ShaderOutput Compile(string shadername, Kind kind)
+        public static ShaderOutput CompileByText(string text, Kind kind, Dictionary<string, string> macros, string? compilerPath = null)
         {
-            var exePath = Path.Combine(_folder, "uam.exe");
-            bool isSuccess = ExecuteCommand(exePath, $"--glslcbinds --nvnctrl=control.bin --nvngpu=program.bin -s {kind} {shadername}");
-            // Ensure files output to correct directory
-            bool filesExist = File.Exists(Path.Combine(_folder, "program.bin")) && 
-                              File.Exists(Path.Combine(_folder, "control.bin"));
-            if (!isSuccess || !filesExist)
+            return CompileByText(GlslUtility.ApplyMacros(macros, text), kind, compilerPath);
+        }
+
+        static ShaderOutput Compile(string executable, string workDirectory, Kind kind)
+        {
+            ExecuteCommand(executable, workDirectory, kind);
+            string programPath = Path.Combine(workDirectory, "program.bin");
+            string controlPath = Path.Combine(workDirectory, "control.bin");
+            if (!File.Exists(programPath) || !File.Exists(controlPath))
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Failed to compile {shadername}!");
-                Console.ResetColor();
-                return new ShaderOutput();
+                throw new InvalidOperationException("UAM did not produce program.bin and control.bin.");
             }
 
             // Raw binary and control shader
-            byte[] shader_bin  = File.ReadAllBytes(Path.Combine(_folder, "program.bin"));
-            byte[] control_bin = File.ReadAllBytes(Path.Combine(_folder, "control.bin"));
+            byte[] shader_bin  = File.ReadAllBytes(programPath);
+            byte[] control_bin = File.ReadAllBytes(controlPath);
+            if (shader_bin.Length == 0 || control_bin.Length == 0)
+                throw new InvalidOperationException("UAM produced an empty shader binary.");
 
-            // Symbol data should dump on the latest fork
-            // Contains names and bind/location info for all the used uniform/input/output/sampler data
+            // Some UAM builds also export symbol names and bindings.
             var symbols = new ShaderSymbolData();
-            if (File.Exists(Path.Combine(_folder, $"symbols.{kind}.json")))
+            string symbolsPath = Path.Combine(workDirectory, $"symbols.{kind}.json");
+            if (File.Exists(symbolsPath))
             {
                 symbols = JsonSerializer.Deserialize<ShaderSymbolData>(
-                    File.ReadAllText(Path.Combine(_folder, $"symbols.{kind}.json")));
+                    File.ReadAllText(symbolsPath)) ?? new ShaderSymbolData();
             }
 
             foreach (var block in symbols.uniformBlocks)
@@ -100,13 +98,12 @@ namespace ShaderBuilderTool
             };
         }
 
-        static bool ExecuteCommand(string exePath, string arguments)
+        static void ExecuteCommand(string exePath, string workDirectory, Kind kind)
         {
             var info = new ProcessStartInfo
             {
                 FileName = exePath,
-                Arguments = arguments,
-                WorkingDirectory = _folder, // ensure relative files resolve
+                WorkingDirectory = workDirectory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -114,39 +111,32 @@ namespace ShaderBuilderTool
             };
             // Todo make a linux build to run natively
             // https://github.com/KillzXGaming/uam/tree/nvn
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) &&
+                Path.GetExtension(exePath).Equals(".exe", StringComparison.OrdinalIgnoreCase))
             {
                 info.FileName = "wine";
-                info.Arguments += $"\"{exePath}\" ";
+                info.ArgumentList.Add(exePath);
             }
-            Process cmd = new Process();
-            cmd.StartInfo = info;
-            cmd.OutputDataReceived += (sender, e) =>
-            {
-                if (!string.IsNullOrEmpty(e.Data))
-                    Console.WriteLine(e.Data);
+            string stageArgument = kind switch {
+                Kind.tesc => "tess_ctrl",
+                Kind.tese => "tess_eval",
+                _ => kind.ToString()
             };
-            cmd.ErrorDataReceived += (sender, e) =>
-            {
-                if (!string.IsNullOrEmpty(e.Data))
-                {
-                    Console.WriteLine($"");
-                    if (e.Data.Contains("warning:"))
-                        Console.ForegroundColor = ConsoleColor.Yellow;
-                    else
-                        Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"{e.Data}");
-                    Console.ResetColor();
-                }
-            };
-            cmd.Start();
+            foreach (string argument in new[] {
+                "--glslcbinds", "--nvnctrl=control.bin", "--nvngpu=program.bin", "-s", stageArgument, "input.glsl" })
+                info.ArgumentList.Add(argument);
 
-            cmd.BeginOutputReadLine();
-            cmd.BeginErrorReadLine();
-
+            using var cmd = Process.Start(info) ?? throw new InvalidOperationException("Could not start UAM.");
+            var stdout = cmd.StandardOutput.ReadToEndAsync();
+            var stderr = cmd.StandardError.ReadToEndAsync();
             cmd.WaitForExit();
-
-            return cmd.ExitCode == 0;
+            Task.WaitAll(stdout, stderr);
+            if (cmd.ExitCode != 0)
+                throw new InvalidOperationException($"UAM failed to compile {kind} (exit {cmd.ExitCode}).\n{stdout.Result}{stderr.Result}");
+            if (stdout.Result.Length != 0)
+                Console.Write(stdout.Result);
+            if (stderr.Result.Length != 0)
+                Console.Error.Write(stderr.Result);
         }
 
 

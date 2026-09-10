@@ -17,12 +17,15 @@ namespace EffectLibraryTest
         }
 
         public static string Decompile(byte[] bytecode, ShaderLibrary.ControlShader control)
+            => Translate(bytecode, control).Code;
+
+        public static ShaderProgram Translate(byte[] bytecode, ShaderLibrary.ControlShader control)
         {
             bool compute = control.ShaderStage == ShaderLibrary.ControlShader.NVNshaderStage.NVN_SHADER_STAGE_COMPUTE;
             var flags = compute ? TranslationFlags.Compute : TranslationFlags.None;
             var options = new TranslationOptions(TargetLanguage.Glsl, TargetApi.OpenGL, flags);
             var accessor = new GpuAccessor(bytecode.AsSpan(checked((int)control.ProgramOffset)).ToArray(), control);
-            return Translator.CreateContext(0, accessor, options).Translate().Code;
+            return Translator.CreateContext(0, accessor, options).Translate();
         }
 
         static string TranslateShader(byte[] data)
