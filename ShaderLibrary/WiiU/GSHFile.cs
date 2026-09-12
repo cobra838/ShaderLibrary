@@ -191,8 +191,17 @@ namespace ShaderLibrary.WiiU
 
             public uint Mode = 1;
 
+            public uint RingItemSize;
             public bool HasStreamOut;
-            public uint StreamOutSize;
+            public uint[] StreamOutStrides = new uint[4];
+            public uint[] ResourceBuffer = new uint[4];
+
+            // Compatibility with callers that only supplied the first buffer.
+            public uint StreamOutSize
+            {
+                get => StreamOutStrides[0];
+                set => StreamOutStrides[0] = value;
+            }
 
             public bool align;
 
@@ -221,7 +230,7 @@ namespace ShaderLibrary.WiiU
                 long pos = reader.Position;
                 ShaderRegsHeader = reader.ReadStruct<GX2VertexShaderStuct>();
 
-                uint size = reader.ReadUInt32();
+                DataSize = reader.ReadUInt32();
                 uint dataOffset = reader.ReadUInt32();
 
                 Mode = reader.ReadUInt32();
@@ -238,8 +247,10 @@ namespace ShaderLibrary.WiiU
                 uint samplerVarsOffset = reader.ReadUInt32() & ~0xD0600000;
                 uint attribVarCount = reader.ReadUInt32();
                 uint attribVarsOffset = reader.ReadUInt32() & ~0xD0600000;
-                HasStreamOut = reader.ReadBoolean();
-                StreamOutSize = reader.ReadUInt32();
+                RingItemSize = reader.ReadUInt32();
+                HasStreamOut = reader.ReadUInt32() != 0;
+                StreamOutStrides = reader.ReadUInt32s(4);
+                ResourceBuffer = reader.ReadUInt32s(4);
 
                 reader.SeekBegin(uniformVarsOffset);
                 for (int i = 0; i < uniformVarCount; i++)
@@ -264,6 +275,9 @@ namespace ShaderLibrary.WiiU
 
             public void Write(BinaryDataWriter writer)
             {
+                if (StreamOutStrides == null || StreamOutStrides.Length != 4 ||
+                    ResourceBuffer == null || ResourceBuffer.Length != 4)
+                    throw new InvalidDataException("GX2 vertex stream strides and resource buffer must contain four words each.");
                 writer.IsWiiU = true;
                 writer.WriteStruct(ShaderRegsHeader);
                 writer.Write(DataSize);
@@ -286,9 +300,10 @@ namespace ShaderLibrary.WiiU
                 writer.Write(Attributes.Count);
                 var attribVariablesOffs = writer.SaveOffset();
 
-                writer.Write(HasStreamOut);
-                writer.Write(StreamOutSize);
-                writer.AlignBytes(4);
+                writer.Write(RingItemSize);
+                writer.Write(HasStreamOut ? 1u : 0u);
+                writer.Write(StreamOutStrides);
+                writer.Write(ResourceBuffer);
 
                 Dictionary<string, List<long>> stringTable = new();
                 void SaveString(string str)
