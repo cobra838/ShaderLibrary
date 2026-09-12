@@ -28,10 +28,19 @@ The caller must supply vertex buffers with the corresponding format, swizzle and
 instance divisor. Float3 attributes also use a vec4 shader input so the fetch
 configuration, rather than this translator, supplies the fourth component.
 
+Unconditional GX2 stream-output writes become integer transform-feedback outputs,
+preserving the written DWORDs even if the source registers change later.
+Both `Prepare` and `Compile` return `StreamOutputs`: buffer indices, byte strides
+and element mappings (byte offset, output location/component and the Maxwell
+varying index). The target pipeline must configure transform feedback using this
+layout and bind the destination buffers. UAM's control bytes alone do not carry
+that configuration. Stream outputs use free locations without replacing the
+ordinary vertex-to-pixel outputs.
+
 Both stages share an instruction translator. ALU groups evaluate
 their inputs before committing register writes, including masked writes and PV/PS.
 It supports scalar arithmetic, DOT4 groups, integer operations, nested IF/ELSE blocks,
-integer predicates, ALU stack pops and explicit POP, 2D/3D sampling, shadow sampling
+integer predicates, ALU stack pops followed by explicit POP, 2D/3D sampling, shadow sampling
 and 2D FETCH4 with its component-order conversion. Uniform-block VFETCH preserves
 dynamic vec4 indexing. Literals retain their source bit patterns. Unsupported
 operations fail with their bytecode offset.
@@ -39,7 +48,7 @@ operations fail with their bytecode offset.
 signed zero. Finite values, infinities and signed zeros were checked through
 NVN compilation and disassembly; behavior on Wii U hardware is not yet verified.
 
-Current limits include CUBE, stream output, other control-flow forms
+Current limits include CUBE, conditional/indexed/burst stream writes, other control-flow forms
 and other texture operations/types. Rasterization-dependent special inputs also
 require further work. Generated stages retain GX2 bindings and buffer layouts;
 this is not yet a complete effect BNSH or `.sesetlist` conversion. Target effect
@@ -49,7 +58,7 @@ work. Shadow-array explicit LOD uses the bundled UAM's extended GLSL overload.
 The GX2 vertex header reader/writer preserves ring item size, the 32-bit stream
 output enable flag, all four stream strides and the GX2R resource descriptor.
 `StreamOutSize` remains an alias for the first stride; use `StreamOutStrides` for
-all buffers. Reading this metadata does not yet convert stream-output writes.
+all buffers.
 
 Instruction decoding and register handling were adapted from Cemu under MPL-2.0
 (`Libs/Cemu License.txt`), using revision `3310f3b8b184d64a62b89fd59088c799432badf5`:

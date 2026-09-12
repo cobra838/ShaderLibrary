@@ -22,6 +22,8 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
     private List<GSHFile.GX2SamplerVar> Samplers => IsVertex ? vertexHeader!.Samplers : header.Samplers;
     internal List<Gx2VertexShaderConversion.VertexAttribute> VertexInputs { get; } = new();
     internal SortedSet<int> VertexOutputs { get; } = new();
+    internal List<Gx2VertexShaderConversion.StreamOutputBuffer> StreamOutputs { get; } = new();
+    private readonly SortedDictionary<int, SortedSet<int>> streamWords = new();
     private bool vertexInputsRead;
     private bool positionWritten;
     private bool usesFiniteReciprocal;
@@ -32,6 +34,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
     private sealed class Branch(HashSet<int> previous)
     {
         public int? Target;
+        public int PopCount;
         public HashSet<int> OnEntry = previous;
         public HashSet<int>? AfterThen;
     }
@@ -60,7 +63,10 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
         Require(Mode == 1, $"shader mode {Mode}");
         Require(code.Length > 0 && code.Length % 8 == 0, "unaligned program");
         if (IsVertex)
-            Require(VertexReg(1) == 0 && VertexReg(49) == 0, "primitive ID or stream output");
+        {
+            Require(VertexReg(1) == 0, "primitive ID input");
+            Require((VertexReg(49) & ~15u) == 0, "invalid stream-output buffer mask");
+        }
         bool ended = false;
         for (int offset = 0; offset < code.Length; offset += 8)
         {
@@ -73,16 +79,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
                 Require(aluKind is 8 or 9 or 10 or 11, $"control-flow ALU operation {aluKind:X}");
                 EmitAlu(a, b, aluKind == 9);
                 if (aluKind is 10 or 11)
-                {
-                    int pops = aluKind == 10 ? 1 : 2;
-                    for (int i = 0; i < pops; i++)
-                    {
-                        Require(branches.Count != 0 && branches.Peek().Target == offset / 8 + 1, "unmatched ALU stack pop");
-                        var branch = branches.Pop();
-                        undefinedPrevious.UnionWith(branch.AfterThen ?? branch.OnEntry);
-                        body.AppendLine("}");
-                    }
-                }
+                    CloseBranches(aluKind == 10 ? 1 : 2, offset / 8 + 1);
             }
             else
             {
@@ -94,6 +91,9 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
                     case 0x27:
                     case 0x28:
                         EmitExport(a, b);
+                        break;
+                    case >= 0x20 and <= 0x23:
+                        EmitStreamOutput(op - 0x20, a, b);
                         break;
                     case 1:
                         Require(Bits(b, 8, 2) == 0, "conditional texture clause");
@@ -115,6 +115,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
                         else
                             Require(branches.Skip(1).Take(popCount - 1).All(x => x.Target == (int)a), "JUMP across mismatched outer blocks");
                         branches.Peek().Target = (int)a;
+                        branches.Peek().PopCount = popCount;
                         break;
                     case 0x0D:
                         Require(branches.Count != 0 && branches.Peek().Target == offset / 8 &&
@@ -123,6 +124,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
                         var alternate = branches.Peek();
                         alternate.AfterThen = new(undefinedPrevious);
                         alternate.Target = (int)a;
+                        alternate.PopCount = 1;
                         undefinedPrevious.Clear();
                         undefinedPrevious.UnionWith(alternate.OnEntry);
                         body.AppendLine("} else {");
@@ -131,13 +133,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
                         int pops = Bits(b, 0, 3);
                         Require(Bits(b, 8, 2) == 0 && pops > 0 && pops <= branches.Count &&
                             a == offset / 8 + 1, "unstructured POP");
-                        for (int i = 0; i < pops; i++)
-                        {
-                            Require(branches.Peek().Target == (int)a, "POP across mismatched blocks");
-                            var branch = branches.Pop();
-                            undefinedPrevious.UnionWith(branch.AfterThen ?? branch.OnEntry);
-                            body.AppendLine("}");
-                        }
+                        CloseBranches(pops, (int)a);
                         break;
                     default: throw Unsupported($"control-flow operation {op:X}");
                 }
@@ -157,6 +153,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
                 declarations.AppendLine($"layout(location = {attribute.Location}) in vec4 gx2_attr{attribute.Location};");
             foreach (int semantic in VertexOutputs)
                 declarations.AppendLine($"layout(location = {semantic}) out vec4 gx2_sem{semantic};");
+            EmitStreamDeclarations(declarations);
             imports.AppendLine("r[0] = uvec4(uint(gl_VertexID), 0u, 0u, uint(gl_InstanceID));");
             semantics = VertexInputs.Select(x => x.Location).ToArray();
         }
@@ -176,6 +173,77 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
         declarations.AppendLine("void main() {\nuvec4 r[128];\nuvec4 pv;\nuint ps;");
         declarations.Append(imports).Append(body).AppendLine("}");
         return new(declarations.ToString(), semantics, colors.ToArray(), buffers.Values.ToArray(), textures.Values.ToArray());
+    }
+
+    private void CloseBranches(int pops, int next)
+    {
+        Require(pops <= branches.Count, "unmatched stack pop");
+        for (int i = 0; i < pops; i++)
+        {
+            var branch = branches.Peek();
+            Require(branch.Target.HasValue && branch.Target >= next, "unmatched stack pop target");
+            int trailingPops = 0;
+            // A failed nested predicate can skip ALU_POP2 followed by POP.
+            // Only pure stack restoration may be skipped here, never ALU work.
+            for (int index = next; index < branch.Target; index++)
+            {
+                uint a = Word(index * 8), b = Word(index * 8 + 4);
+                Require(Bits(b, 23, 7) == 0x0E && Bits(b, 8, 2) == 0 &&
+                    Bits(b, 0, 3) > 0 && (b & (1u << 21)) == 0 && a == index + 1,
+                    "stack pop target skips executable instructions");
+                trailingPops += Bits(b, 0, 3);
+            }
+            Require(branch.PopCount == pops - i + trailingPops, "JUMP/ELSE stack pop count mismatch");
+            branches.Pop();
+            undefinedPrevious.UnionWith(branch.AfterThen ?? branch.OnEntry);
+            body.AppendLine("}");
+        }
+    }
+
+    private void EmitStreamOutput(int buffer, uint a, uint b)
+    {
+        Require(IsVertex && vertexHeader!.HasStreamOut && (VertexReg(49) & (1u << buffer)) != 0,
+            "stream write without an enabled buffer");
+        Require(branches.Count == 0, "conditional stream output");
+        Require(Bits(a, 13, 2) == 0 && Bits(a, 22, 10) == 0 && Bits(b, 17, 4) == 0,
+            "indexed or burst stream write");
+        int count = Bits(b, 0, 12) + 1, mask = Bits(b, 12, 4);
+        Require(count <= 4 && mask != 0 && (mask >> count) == 0, "invalid stream write component range");
+        int first = Bits(a, 0, 13), source = Bits(a, 15, 7);
+        uint stride = vertexHeader!.StreamOutStrides[buffer];
+        Require(stride > 0 && stride % 4 == 0 && (long)(first + count) * 4 <= stride,
+            "stream write outside its vertex stride");
+        if (!streamWords.TryGetValue(buffer, out var words)) streamWords[buffer] = words = new();
+        for (int component = 0; component < count; component++)
+        {
+            if ((mask & (1 << component)) == 0) continue;
+            int word = first + component;
+            words.Add(word);
+            body.AppendLine($"gx2_stream{buffer}_{word} = r[{source}].{Channel(component)};");
+        }
+    }
+
+    private void EmitStreamDeclarations(StringBuilder declarations)
+    {
+        var free = new Queue<int>(Enumerable.Range(0, 32).Where(x => !VertexOutputs.Contains(x)));
+        foreach (var (buffer, words) in streamWords)
+        {
+            var elements = new List<Gx2VertexShaderConversion.StreamOutputElement>();
+            int location = -1, component = 4;
+            uint stride = vertexHeader!.StreamOutStrides[buffer];
+            foreach (int word in words)
+            {
+                if (component == 4)
+                {
+                    Require(free.Count > 0, "no free output location for stream data");
+                    location = free.Dequeue();
+                    component = 0;
+                }
+                declarations.AppendLine($"layout(location = {location}, component = {component}, xfb_buffer = {buffer}, xfb_offset = {word * 4}, xfb_stride = {stride}) out uint gx2_stream{buffer}_{word};");
+                elements.Add(new(word * 4, location, component++));
+            }
+            StreamOutputs.Add(new(buffer, stride, elements.ToArray()));
+        }
     }
 
     private static string SamplerType(GX2SamplerVarType type) => type switch
