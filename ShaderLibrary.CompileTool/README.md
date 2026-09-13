@@ -28,6 +28,22 @@ The caller must supply vertex buffers with the corresponding format, swizzle and
 instance divisor. Float3 attributes also use a vec4 shader input so the fetch
 configuration, rather than this translator, supplies the fourth component.
 
+`Gx2ShaderProgramConversion.Compile(vertex, pixel)` compiles two source stages
+selected by the caller as one program. It assigns a shared dense location map to
+the pixel input semantics, compiles the pixel stage, and reads its optimized
+component usage from the Maxwell pixel header. The vertex stage exports only
+those components, allowing UAM to remove computations used solely by discarded
+outputs. Position and transform-feedback writes are retained. Missing vertex
+components required by the pixel stage are reported as an error.
+The result contains both binaries, both prepared stages and `Varyings`
+(`SourceSemantic`, target `Location`, and XYZW `ComponentMask`). Prepared-stage
+semantic arrays still contain source IDs; use `Varyings` for target locations.
+Stream-output locations are allocated after this remapping to avoid collisions.
+The separate-stage APIs keep their original interfaces and output behavior.
+This linking does not infer stage pairs from GFD order or remap vertex buffers
+and uniforms to the original Switch effect's layouts. It requires no Switch
+original and does not relax floating-point operations to reduce code size.
+
 Unconditional GX2 stream-output writes become integer transform-feedback outputs,
 preserving the written DWORDs even if the source registers change later.
 Both `Prepare` and `Compile` return `StreamOutputs`: buffer indices, byte strides

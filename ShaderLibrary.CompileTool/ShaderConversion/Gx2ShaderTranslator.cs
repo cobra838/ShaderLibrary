@@ -9,10 +9,15 @@ using static ShaderLibrary.CompileTool.Gx2PixelShaderConversion;
 
 namespace ShaderLibrary.CompileTool;
 
-internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] code)
+internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] code,
+    IReadOnlyDictionary<int, int>? varyingLocations = null,
+    IReadOnlyDictionary<int, int>? outputMasks = null)
 {
     private readonly GSHFile.GX2VertexHeader? vertexHeader;
-    internal Gx2ShaderTranslator(GSHFile.GX2VertexHeader header, byte[] code) : this((GSHFile.GX2PixelHeader)null!, code)
+    internal Gx2ShaderTranslator(GSHFile.GX2VertexHeader header, byte[] code,
+        IReadOnlyDictionary<int, int>? varyingLocations = null,
+        IReadOnlyDictionary<int, int>? outputMasks = null)
+        : this((GSHFile.GX2PixelHeader)null!, code, varyingLocations, outputMasks)
     {
         vertexHeader = header;
     }
@@ -22,6 +27,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
     private List<GSHFile.GX2SamplerVar> Samplers => IsVertex ? vertexHeader!.Samplers : header.Samplers;
     internal List<Gx2VertexShaderConversion.VertexAttribute> VertexInputs { get; } = new();
     internal SortedSet<int> VertexOutputs { get; } = new();
+    internal Dictionary<int, int> VertexOutputMasks { get; } = new();
     internal List<Gx2VertexShaderConversion.StreamOutputBuffer> StreamOutputs { get; } = new();
     private readonly SortedDictionary<int, SortedSet<int>> streamWords = new();
     private bool vertexInputsRead;
@@ -152,7 +158,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
             foreach (var attribute in VertexInputs.DistinctBy(x => x.Location))
                 declarations.AppendLine($"layout(location = {attribute.Location}) in vec4 gx2_attr{attribute.Location};");
             foreach (int semantic in VertexOutputs)
-                declarations.AppendLine($"layout(location = {semantic}) out vec4 gx2_sem{semantic};");
+                declarations.AppendLine($"layout(location = {VaryingLocation(semantic)}) out vec4 gx2_sem{semantic};");
             EmitStreamDeclarations(declarations);
             imports.AppendLine("r[0] = uvec4(uint(gl_VertexID), 0u, 0u, uint(gl_InstanceID));");
             semantics = VertexInputs.Select(x => x.Location).ToArray();
@@ -225,7 +231,8 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
 
     private void EmitStreamDeclarations(StringBuilder declarations)
     {
-        var free = new Queue<int>(Enumerable.Range(0, 32).Where(x => !VertexOutputs.Contains(x)));
+        var occupied = VertexOutputs.Select(VaryingLocation).ToHashSet();
+        var free = new Queue<int>(Enumerable.Range(0, 32).Where(x => !occupied.Contains(x)));
         foreach (var (buffer, words) in streamWords)
         {
             var elements = new List<Gx2VertexShaderConversion.StreamOutputElement>();
@@ -366,7 +373,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
             bool flat = (input & 0x400) != 0;
             string qualifiers = flat ? "flat " : ((input & 0x1000) != 0 ? "noperspective " : "");
             if (!flat && (input & 0x800) != 0) qualifiers += "centroid ";
-            declarations.AppendLine($"layout(location = {semantic}) {qualifiers}in vec4 gx2_sem{semantic};");
+            declarations.AppendLine($"layout(location = {VaryingLocation(semantic)}) {qualifiers}in vec4 gx2_sem{semantic};");
             imports.AppendLine($"r[{i}] = floatBitsToUint(gx2_sem{semantic});");
             semantics.Add(semantic);
         }
@@ -395,6 +402,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
     }
 
     private byte[]? vertexRegisters;
+    private int VaryingLocation(int semantic) => varyingLocations == null ? semantic : varyingLocations[semantic];
     private uint VertexReg(int index) => BinaryPrimitives.ReadUInt32BigEndian((vertexRegisters ??= vertexHeader!.GetRegs()).AsSpan(index * 4, 4));
 
     private void ReadVertexInputs()
@@ -426,6 +434,7 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
         for (int i = 0; i <= burst; i++)
         {
             string target;
+            int componentMask = 15, outputSemantic = -1;
             if (type == 1 && first + i == 60) { target = "gl_Position"; positionWritten = true; }
             else if (type == 2 && first + i < 32)
             {
@@ -434,6 +443,12 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
                 int semantic = Bits(VertexReg(4 + param / 4), (param % 4) * 8, 8);
                 if (semantic == 255) continue; // GX2 disables this parameter export.
                 Require(semantic < 32, "vertex output semantic range");
+                if (outputMasks != null)
+                {
+                    componentMask = outputMasks.GetValueOrDefault(semantic);
+                    if (componentMask == 0) continue;
+                }
+                outputSemantic = semantic;
                 VertexOutputs.Add(semantic);
                 target = $"gx2_sem{semantic}";
             }
@@ -443,6 +458,9 @@ internal sealed class Gx2ShaderTranslator(GSHFile.GX2PixelHeader header, byte[] 
                 int sel = Bits(b, c * 3, 3);
                 if (sel == 7) continue;
                 Require(sel <= 5, "reserved vertex export selector");
+                if ((componentMask & (1 << c)) == 0) continue;
+                if (outputSemantic >= 0)
+                    VertexOutputMasks[outputSemantic] = VertexOutputMasks.GetValueOrDefault(outputSemantic) | (1 << c);
                 string value = sel < 4 ? $"uintBitsToFloat(r[{gpr + i}].{Channel(sel)})" : sel == 4 ? "0.0" : "1.0";
                 body.AppendLine($"{target}.{Channel(c)} = {value};");
             }
